@@ -164,6 +164,22 @@ def find_relevant_disclosures(disclosures, cutoff_date=None):
     return latest_release, latest_designation
 
 
+def find_halt_preview(disclosures, today, lookback_days=3):
+    """매매거래정지 예고 공시 검색. T-1(=today) 전후 lookback_days 내에서."""
+    cutoff_start = today - timedelta(days=lookback_days)
+    for d in disclosures:
+        try:
+            d_date = datetime.fromisoformat(d["datetime"]).date()
+        except (ValueError, KeyError):
+            continue
+        if d_date < cutoff_start or d_date > today:
+            continue
+        title = d.get("title", "") or ""
+        if "매매거래정지" in title and "예고" in title:
+            return d
+    return None
+
+
 def parse_korean_date(s, ref_year=None, ref_month=None):
     m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", s)
     if m:
@@ -423,23 +439,30 @@ def check_warning_stock(name, today=None):
         )
 
     if calc["halt"]:
-        h = calc["halt"]
-        halt_pct = (h["price"] / today_close - 1) * 100
-        if h["reachable"]:
-            lines.append(
-                f"⚠ 거래정지 트리거: 종가 ≥ {h['price']:,.0f}원 ({halt_pct:+.1f}%) "
-                f"[상한가 {h['sanghan']:,}원]"
-            )
-            effective = min(calc["binding"], h["price"])
-            effective_pct = (effective / today_close - 1) * 100
-            lines.append(
-                f"실효 해제 임계가 (보수): < {effective:,.0f}원 ({effective_pct:+.1f}% 미만)"
-            )
+        halt_preview = find_halt_preview(disclosures, today)
+        if not halt_preview:
+            lines.append("거래정지 위험: 없음 (매매거래정지 예고 공시 없음)")
         else:
+            h = calc["halt"]
+            halt_pct = (h["price"] / today_close - 1) * 100
             lines.append(
-                f"거래정지 트리거: {h['price']:,.0f}원 ({halt_pct:+.1f}%) — "
-                f"상한가({h['sanghan']:,}원) 초과로 도달 불가"
+                f"매매거래정지 예고: {halt_preview['datetime'][:10]} 발행"
             )
+            if h["reachable"]:
+                lines.append(
+                    f"⚠ 거래정지 트리거: 종가 ≥ {h['price']:,.0f}원 ({halt_pct:+.1f}%) "
+                    f"[상한가 {h['sanghan']:,}원]"
+                )
+                effective = min(calc["binding"], h["price"])
+                effective_pct = (effective / today_close - 1) * 100
+                lines.append(
+                    f"실효 해제 임계가 (보수): < {effective:,.0f}원 ({effective_pct:+.1f}% 미만)"
+                )
+            else:
+                lines.append(
+                    f"거래정지 트리거: {h['price']:,.0f}원 ({halt_pct:+.1f}%) — "
+                    f"상한가({h['sanghan']:,}원) 초과로 도달 불가"
+                )
 
     return "\n".join(lines)
 
