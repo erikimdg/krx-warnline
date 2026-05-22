@@ -97,6 +97,7 @@ def fetch_disclosure_detail(code, disclosure_id):
 
 
 def fetch_daily_prices(code, start, end):
+    """일별 종가. 거래정지일(시가/거래량 0) 자동 skip."""
     url = (
         f"https://fchart.stock.naver.com/siseJson.naver?symbol={code}"
         f"&requestType=1&startTime={start.strftime('%Y%m%d')}"
@@ -107,16 +108,43 @@ def fetch_daily_prices(code, start, end):
     out = []
     for row in rows[1:]:
         parts = [p.strip().strip('"').strip("'") for p in row.split(",")]
-        if len(parts) < 5:
+        if len(parts) < 6:
             continue
         try:
             d = datetime.strptime(parts[0], "%Y%m%d").date()
+            open_p = float(parts[1])
             close = int(float(parts[4]))
+            volume = float(parts[5])
         except (ValueError, IndexError):
             continue
+        if open_p == 0 or volume == 0:
+            continue  # 거래정지일 skip
         out.append((d, close))
     out.sort()
     return out
+
+
+PREFERRED_SUFFIX_RE = re.compile(r"\(([^()]+우[BC]?)\)$")
+
+
+def is_preferred_stock_name(name):
+    """우선주 표기 (이름이 '우', '우B', '우C'로 끝남)."""
+    return name.endswith("우") or name.endswith("우B") or name.endswith("우C")
+
+
+def common_code_for_preferred(preferred_code):
+    """우선주 코드 → 보통주 코드 (마지막 자리 → 0). 005935 → 005930."""
+    return preferred_code[:-1] + "0"
+
+
+def disclosure_matches_target(title, target_name):
+    """공시 제목이 target_name 종목 대상인지 판정.
+    제목 끝에 '(...우)' 표기가 있으면 그 표기가 target_name과 일치할 때만 True.
+    없으면 target_name이 보통주일 때만 True."""
+    m = PREFERRED_SUFFIX_RE.search(title or "")
+    if m:
+        return m.group(1) == target_name
+    return not is_preferred_stock_name(target_name)
 
 
 def html_to_text(html_content):
@@ -349,12 +377,25 @@ def check_warning_stock(name, today=None):
     tomorrow = next_trading_day(today)
 
     code = resolve_code(name)
+    is_preferred = is_preferred_stock_name(name)
+    if is_preferred:
+        disclosure_code = common_code_for_preferred(code)
+        price_code = code
+    else:
+        disclosure_code = code
+        price_code = code
+
     lines.append(f"종목명: {name}")
-    lines.append(f"종목코드: {code}")
+    if is_preferred:
+        lines.append(f"종목코드: {code} (우선주)  | 공시조회: {disclosure_code} (보통주)")
+    else:
+        lines.append(f"종목코드: {code}")
     lines.append(f"실행일: {_fmt_date(today)}")
     lines.append(f"다음 거래일: {_fmt_date(tomorrow)}")
 
-    disclosures = fetch_disclosures(code)
+    disclosures = fetch_disclosures(disclosure_code)
+    # 우선주/보통주 구분: 제목 끝 (XXX우) 표기로 필터
+    disclosures = [d for d in disclosures if disclosure_matches_target(d.get("title", ""), name)]
     rel, des = find_relevant_disclosures(disclosures, cutoff_date=today)
 
     if not rel and not des:
@@ -371,7 +412,7 @@ def check_warning_stock(name, today=None):
         latest_is_release = True
 
     if latest_is_release:
-        contents = fetch_disclosure_detail(code, rel["disclosureId"])
+        contents = fetch_disclosure_detail(disclosure_code, rel["disclosureId"])
         text = html_to_text(contents)
         release_date = parse_release_notice(text)
 
@@ -394,7 +435,7 @@ def check_warning_stock(name, today=None):
         return "\n".join(lines)
 
     # 지정 공시가 최신
-    contents = fetch_disclosure_detail(code, des["disclosureId"])
+    contents = fetch_disclosure_detail(disclosure_code, des["disclosureId"])
     text = html_to_text(contents)
     parsed = parse_designation_notice(text)
 
@@ -440,7 +481,7 @@ def check_warning_stock(name, today=None):
         return "\n".join(lines)
 
     start = (parsed["지정일"] or today) - timedelta(days=60)
-    prices = fetch_daily_prices(code, start, today)
+    prices = fetch_daily_prices(price_code, start, today)
     if not prices:
         lines.append("")
         lines.append("가격 데이터 조회 실패")
