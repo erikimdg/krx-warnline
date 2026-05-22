@@ -128,8 +128,17 @@ def html_to_text(html_content):
     return text
 
 
+DESIGNATION_RE = re.compile(r"투자경고종목\s*지정(\s*\([^)]+\))?$")
+
+
 def classify_disclosure(title):
-    """Returns: 'release', 'designation', or None."""
+    """Returns: 'release', 'designation', or None.
+
+    Designation requires the title to END with '투자경고종목 지정' (optionally
+    followed by a parenthetical like '(재지정)'). This excludes ancillary
+    notices such as '매매거래 정지 및 재개(투자경고종목 지정중)' that contain
+    the keyword but are not the original designation notice.
+    """
     t = title or ""
     if "투자경고종목" not in t and "투자경고" not in t:
         return None
@@ -137,7 +146,7 @@ def classify_disclosure(title):
         return "release"
     if "지정예고" in t:
         return None
-    if "지정" in t:
+    if DESIGNATION_RE.search(t):
         return "designation"
     return None
 
@@ -176,6 +185,28 @@ def find_halt_preview(disclosures, today, lookback_days=3):
             continue
         title = d.get("title", "") or ""
         if "매매거래정지" in title and "예고" in title:
+            return d
+    return None
+
+
+def find_risk_escalation(disclosures, after_date=None, cutoff_date=None):
+    """투자위험종목 격상 감지. after_date 이후 발행된 공시 중에서."""
+    for d in disclosures:
+        try:
+            d_date = datetime.fromisoformat(d["datetime"]).date()
+        except (ValueError, KeyError):
+            continue
+        if after_date and d_date <= after_date:
+            continue
+        if cutoff_date and d_date > cutoff_date:
+            continue
+        title = d.get("title", "") or ""
+        if (
+            "투자위험종목" in title
+            and "지정" in title
+            and "해제" not in title
+            and "예고" not in title
+        ):
             return d
     return None
 
@@ -366,6 +397,15 @@ def check_warning_stock(name, today=None):
     contents = fetch_disclosure_detail(code, des["disclosureId"])
     text = html_to_text(contents)
     parsed = parse_designation_notice(text)
+
+    # 투자위험 격상 감지 (지정 이후로)
+    des_date = datetime.fromisoformat(des["datetime"]).date()
+    risk_esc = find_risk_escalation(disclosures, after_date=des_date, cutoff_date=today)
+    if risk_esc:
+        lines.append("")
+        lines.append(f"⚠ 투자위험종목 격상 감지: {risk_esc['datetime'][:10]} {risk_esc['title']}")
+        lines.append("→ 투자경고 분석은 무효. 투자위험종목 별도 처리 필요.")
+        return "\n".join(lines)
 
     lines.append("")
     lines.append(f"최신 공시: {des['title']}")
