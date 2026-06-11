@@ -1,4 +1,4 @@
-# tugyeong-eod
+# krx-warnline
 
 An End-of-Day CLI for Korea Exchange (KRX) market-alert stocks. Give it a stock name and it reports, for the **next trading day**:
 
@@ -27,8 +27,8 @@ Output is a single multi-line block (in Korean, matching KRX terminology). Desig
 ## Install
 
 ```bash
-git clone https://github.com/erikimdg/tugyeong-eod.git
-cd tugyeong-eod
+git clone https://github.com/erikimdg/krx-warnline.git
+cd krx-warnline
 ```
 
 ## Usage
