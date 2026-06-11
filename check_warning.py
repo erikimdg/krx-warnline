@@ -38,10 +38,32 @@ def floor_to_tick(price):
     return int(price)
 
 
+def ceil_to_tick(price):
+    import math
+    for limit, tick in TICK_TABLE:
+        if price < limit:
+            return int(math.ceil(price / tick) * tick)
+    return int(price)
+
+
+import ssl
+
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX_UNVERIFIED = ssl._create_unverified_context()
+
+
 def _http_get(url):
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        # 사내 프록시 등으로 인증서 체인 검증 실패 시 — 공개 데이터 조회이므로 미검증 재시도
+        reason = getattr(e, "reason", None)
+        if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+            with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX_UNVERIFIED) as r:
+                return r.read().decode("utf-8", errors="replace")
+        raise
 
 
 def _load_cache():
@@ -173,7 +195,8 @@ def classify_disclosure(title):
     if "지정해제" in t:
         return "release"
     if "지정예고" in t:
-        return None
+        # 투자경고종목 지정예고 (투자주의 단계 → 투자경고 전환 요건 안내)
+        return "predesignation" if "투자경고" in t else None
     if DESIGNATION_RE.search(t):
         return "designation"
     return None
@@ -414,10 +437,20 @@ def check_warning_stock(name, today=None):
     # 우선주/보통주 구분: 제목 끝 (XXX우) 표기로 필터
     disclosures = [d for d in disclosures if disclosure_matches_target(d.get("title", ""), name)]
     rel, des = find_relevant_disclosures(disclosures, cutoff_date=today)
+    pre = find_latest_predesignation(disclosures, cutoff_date=today)
 
-    if not rel and not des:
+    if not rel and not des and not pre:
         lines.append("")
         lines.append("상태: 투자경고 관련 공시 없음")
+        return "\n".join(lines)
+
+    # 가장 최신 관련 공시가 '지정예고'면 → 지정 전환 요건 분석으로 분기
+    present = [(d, k) for d, k in ((rel, "release"), (des, "designation"), (pre, "predesignation")) if d]
+    newest_kind = max(present, key=lambda x: _disc_datetime(x[0]))[1]
+    if newest_kind == "predesignation":
+        lines += _predesignation_report(
+            name, code, price_code, disclosure_code, pre, today, tomorrow, disclosures
+        )
         return "\n".join(lines)
 
     latest_is_release = False
@@ -573,13 +606,320 @@ def check_warning_stock(name, today=None):
     return "\n".join(lines)
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("사용법: python3 check_warning.py <종목명>", file=sys.stderr)
-        sys.exit(1)
-    name = sys.argv[1]
+# ─────────────────────────────────────────────────────────────────────────
+# 투자경고종목 "지정예고" → "지정" 전환 요건 분석
+# (투자주의 단계에서, 판단일 T에 어떤 종가를 찍으면 투자경고로 지정되는지)
+# ─────────────────────────────────────────────────────────────────────────
+
+PRE_ANCHOR_RE = re.compile(r"①\s*판단일")
+
+
+def _disc_datetime(d):
+    """공시 datetime 문자열 파싱 (ISO 또는 MM/DD/YYYY 형식 모두 허용)."""
+    s = d.get("datetime", "") or ""
     try:
-        print(check_warning_stock(name))
+        return datetime.fromisoformat(s)
+    except ValueError:
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+    raise ValueError(f"datetime 파싱 실패: {s}")
+
+
+def fetch_market(name, code):
+    """ac 자동완성에서 시장 구분(KOSPI/KOSDAQ) 추출. 실패 시 None."""
+    try:
+        data = json.loads(_http_get(f"https://ac.stock.naver.com/ac?q={quote(name)}&target=stock"))
+        for it in data.get("items", []):
+            if it.get("code") == code:
+                tc = (it.get("typeCode") or "").upper()
+                if "KOSPI" in tc:
+                    return "KOSPI"
+                if "KOSDAQ" in tc:
+                    return "KOSDAQ"
+    except Exception:
+        pass
+    return None
+
+
+def fetch_market_cap(code):
+    """m.stock integration → (시총 문자열, 억원 정수). 실패 시 (None, None)."""
+    try:
+        data = json.loads(_http_get(f"https://m.stock.naver.com/api/stock/{code}/integration"))
+        for info in data.get("totalInfos", []):
+            if info.get("code") == "marketValue":
+                raw = info.get("value", "") or ""
+                eok = 0
+                m_jo = re.search(r"([\d,]+)\s*조", raw)
+                m_eok = re.search(r"([\d,]+)\s*억", raw)
+                if m_jo:
+                    eok += int(m_jo.group(1).replace(",", "")) * 10000
+                if m_eok:
+                    eok += int(m_eok.group(1).replace(",", ""))
+                return raw, (eok or None)
+    except Exception:
+        pass
+    return None, None
+
+
+def find_latest_predesignation(disclosures, cutoff_date=None):
+    """가장 최신 '투자경고종목 지정예고' 공시. cutoff_date로 백테스트 시점 필터."""
+    for d in disclosures:
+        if cutoff_date is not None:
+            try:
+                if _disc_datetime(d).date() > cutoff_date:
+                    continue
+            except ValueError:
+                continue
+        if classify_disclosure(d.get("title", "")) == "predesignation":
+            return d
+    return None
+
+
+def parse_predesignation_notice(text):
+    """지정예고 공시 본문 → 예고일/판단일/순연마감 + 지정 경로(paths) 목록.
+
+    paths 각 원소: {kind, pct|excess, cond3, needs_15d_high, needs_rank, label}
+      kind: 'short_index5x'(단기급등) | 'short_account'(단기상승·불건전) | 'long'(초장기)
+      cond3: 'index5x'(종합주가지수 5배, 계산가능) | 'account'(매수관여율, 비공개)
+    """
+    out = {"지정예고일": None, "최초_판단일": None, "순연_마감일": None, "paths": []}
+
+    m = re.search(r"지정예고일[^\d]*((?:\d{4}\s*년\s*)?\d{1,2}\s*월\s*\d{1,2}\s*일)", text)
+    if m:
+        out["지정예고일"] = parse_korean_date(m.group(1))
+    ref_year = out["지정예고일"].year if out["지정예고일"] else None
+    ref_month = out["지정예고일"].month if out["지정예고일"] else None
+
+    m = re.search(r"최초\s*판단일[^\d]*((?:\d{4}\s*년\s*)?\d{1,2}\s*월\s*\d{1,2}\s*일)", text)
+    if m:
+        out["최초_판단일"] = parse_korean_date(m.group(1), ref_year, ref_month)
+
+    m = re.search(r"\(((?:\d{4}\s*년\s*)?\d{1,2}\s*월\s*\d{1,2}\s*일)\s*까지\)", text)
+    if m:
+        out["순연_마감일"] = parse_korean_date(m.group(1), ref_year, ref_month)
+
+    anchors = [mm.start() for mm in PRE_ANCHOR_RE.finditer(text)]
+    for i, pos in enumerate(anchors):
+        end = anchors[i + 1] if i + 1 < len(anchors) else len(text)
+        block = text[pos:end]
+        path = {
+            "kind": None, "pct": None, "excess": None, "cond3": None,
+            "needs_15d_high": "15일" in block, "needs_rank": "100위" in block,
+            "label": None,
+        }
+        m_long = re.search(r"1년간\s*초과\s*주가상승률이?\s*(\d+)\s*%", block)
+        m_short = re.search(r"5일\s*전날\s*\(?\s*T-?\s*5\s*\)?\s*의?\s*종가보다\s*(\d+)\s*%", block)
+        if m_long:
+            pct = int(m_long.group(1))
+            path.update(kind="long", excess=pct / 100, cond3="account",
+                        label=f"초장기상승·불건전 (1년 초과상승률 {pct}%)")
+        elif m_short:
+            pct = int(m_short.group(1))
+            path["pct"] = pct / 100
+            if "5배" in block:
+                path.update(kind="short_index5x", cond3="index5x",
+                            label=f"단기급등 (T-5 +{pct}%)")
+            elif "매수관여율" in block or "특정계좌" in block:
+                path.update(kind="short_account", cond3="account",
+                            label=f"단기상승·불건전 (T-5 +{pct}%)")
+            else:
+                path.update(kind="short", cond3=None, label=f"단기 (T-5 +{pct}%)")
+        else:
+            continue
+        out["paths"].append(path)
+    return out
+
+
+def _predesignation_report(name, code, price_code, disclosure_code, pre, today, tomorrow, disclosures):
+    """지정예고 공시 → 판단일 T 지정 요건/임계가 리포트 라인 리스트."""
+    lines = []
+    contents = fetch_disclosure_detail(disclosure_code, pre["disclosureId"])
+    text = html_to_text(contents)
+    parsed = parse_predesignation_notice(text)
+
+    lines.append("")
+    lines.append(f"최신 공시: {pre['title']}")
+    lines.append(f"공시일시: {pre['datetime']}")
+    if parsed["지정예고일"]:
+        lines.append(f"지정예고일: {_fmt_date(parsed['지정예고일'])}")
+    if parsed["최초_판단일"]:
+        lines.append(f"최초 판단일: {_fmt_date(parsed['최초_판단일'])}")
+    if parsed["순연_마감일"]:
+        lines.append(f"순연 마감(판단 종료): {_fmt_date(parsed['순연_마감일'])}")
+    if not parsed["paths"]:
+        lines.append("")
+        lines.append("지정요건 파싱 실패 — 본문 수동 확인 필요")
+        return lines
+
+    need_long = any(p["kind"] == "long" for p in parsed["paths"])
+    start = today - timedelta(days=520 if need_long else 80)
+    prices = fetch_daily_prices(price_code, start, today)
+    if len(prices) < 15:
+        lines.append("")
+        lines.append(f"가격 데이터 부족 ({len(prices)}일)")
+        return lines
+
+    t1_d, t1 = prices[-1]            # 판단일 직전 거래일 (T-1)
+    t5_d, t5 = prices[-5]            # T-5
+    prior14 = prices[-14:]          # T-1 ~ T-14 (T 제외한 직전 14거래일)
+    max14 = max(c for _, c in prior14)
+    max14_d = next(d for d, c in prior14 if c == max14)
+
+    market = fetch_market(name, code) or "KOSDAQ"
+    mktcap_raw, _ = fetch_market_cap(price_code)
+    try:
+        idx_prices = fetch_daily_prices(market, start, today)
+    except Exception:
+        idx_prices = []
+
+    lines.append("")
+    lines.append(f"시장: {market}  |  판단일(T) = {_fmt_date(tomorrow)} 기준 (다음 거래일)")
+    lines.append(f"T-1 {_fmt_date(t1_d)} 종가 {t1:,}원  |  T-5 {_fmt_date(t5_d)} 종가 {t5:,}원")
+    if mktcap_raw:
+        lines.append(f"시가총액: {mktcap_raw}")
+    lines.append(f"② 최근 15일 최고종가(T 제외): {max14:,}원 [{max14_d}] → T 종가가 이보다 높아야 충족")
+
+    sanghan = floor_to_tick(t1 * 1.3)
+    triggers = []
+
+    for n, p in enumerate(parsed["paths"], 1):
+        lines.append("")
+        lines.append(f"── 경로 [{n}] {p['label']} ──")
+
+        if p["kind"] == "long":
+            ref = date(tomorrow.year - 1, tomorrow.month, tomorrow.day)  # 1년 전(판단일 기준)
+            base = base_d = None
+            for d, c in prices:
+                if d <= ref:
+                    base_d, base = d, c
+            if base is None:
+                lines.append("  1년 전 가격 없음 — 임계가 계산 불가")
+                continue
+            idx_ret = None
+            if idx_prices:
+                ib = None
+                for d, c in idx_prices:
+                    if d <= ref:
+                        ib = c
+                if ib:
+                    idx_ret = idx_prices[-1][1] / ib - 1
+            if idx_ret is None:
+                lines.append("  지수 데이터 없음 — 초과상승률 임계가 계산 불가")
+                continue
+            thr = base * (1 + p["excess"] + idx_ret)
+            trig = max(thr, max14)
+            binder = "①" if thr >= max14 else "②"
+            strict = thr < max14  # ②(최고가 초과)가 실효 기준이면 강부등호
+            reach = "도달가능" if trig <= sanghan else f"도달불가(상한가 {sanghan:,} 초과)"
+            lines.append(f"  ① 1년전 {_fmt_date(base_d)} 종가 {base:,}원, {market} 1년 {idx_ret*100:+.2f}% (지수는 T-1 근사)")
+            lines.append(f"     임계가 = {base:,}×(1+{p['excess']:.2f}+{idx_ret:.4f}) = {thr:,.0f}원 (호가 {ceil_to_tick(thr):,})")
+            lines.append(f"  ② {max14:,}원 초과 필요 ({'①가 상회' if thr >= max14 else '②가 실효 기준'})")
+            lines.append(f"  ③ 매수관여율(특정계좌) — ⚠ 외부확인불가 (KRX 내부 감시데이터)")
+            lines.append(f"  ④ 합산 시총 100위 밖 — {mktcap_raw or '확인필요'} (통상 충족·정밀순위는 KRX)")
+            lines.append(
+                f"  ▶ 가격 트리거({binder}): {trig:,.0f}원 {'초과' if strict else '이상'}  "
+                f"(T-1 대비 {(trig/t1-1)*100:+.2f}%)  | 상한가 {sanghan:,}원 → {reach}"
+            )
+            triggers.append({
+                "label": p["label"], "trig": trig, "pctchg": (trig / t1 - 1) * 100,
+                "confirm": False, "is_long": True, "strict": strict,
+                "note": "③ 매수관여율(비공개) 동반",
+            })
+
+        else:
+            pct = p["pct"]
+            thr = t5 * (1 + pct)
+            trig = max(thr, max14)
+            binder = "①" if thr >= max14 else "②"
+            lines.append(f"  ① T-5 {t5:,} × {1+pct:.2f} = {thr:,.0f}원 (호가 {ceil_to_tick(thr):,})  |  T-1 대비 {(thr/t1-1)*100:+.2f}%")
+            lines.append(f"  ② {max14:,}원 초과 필요 (①가 {'상회' if thr > max14 else '미달→②가 실효 기준'})")
+            if p["cond3"] == "index5x":
+                if len(idx_prices) >= 5:
+                    idx_ret5 = idx_prices[-1][1] / idx_prices[-5][1] - 1
+                    ok = pct >= 5 * idx_ret5
+                    lines.append(
+                        f"  ③ 주가상승률 ≥ {market} 5배: 지수 5일 {idx_ret5*100:+.2f}%, "
+                        f"임계 {pct*100:.0f}% {'≥' if ok else '<'} {5*idx_ret5*100:.1f}% "
+                        f"{'✅충족' if ok else '❌미달'} (T-1 근사)"
+                    )
+                    note = "③ 지수5배 " + ("충족" if ok else "미달")
+                else:
+                    lines.append(f"  ③ 주가상승률 ≥ {market} 5배 — 지수 데이터 없음")
+                    note = "③ 지수5배(미확인)"
+            else:
+                lines.append(f"  ③ 매수관여율(특정계좌) — ⚠ 외부확인불가 (KRX 내부 감시데이터)")
+                note = "③ 매수관여율(비공개) 동반"
+            lines.append(f"  ④ 합산 시총 100위 밖 — {mktcap_raw or '확인필요'} (통상 충족)")
+            strict = thr < max14  # ②가 실효 기준이면 강부등호(초과)
+            reach = "도달가능" if trig <= sanghan else f"도달불가(상한가 {sanghan:,} 초과)"
+            lines.append(
+                f"  ▶ 가격 트리거({binder}): {trig:,.0f}원 {'초과' if strict else '이상'} (호가 {ceil_to_tick(trig):,})  "
+                f"(T-1 대비 {(trig/t1-1)*100:+.2f}%)  | 상한가 {sanghan:,}원 → {reach}"
+            )
+            triggers.append({
+                "label": p["label"], "trig": trig, "pctchg": (trig / t1 - 1) * 100,
+                "confirm": (p["cond3"] == "index5x"), "is_long": False, "strict": strict,
+                "note": note,
+            })
+
+    lines.append("")
+    lines.append("=== 요약 (판단일 T 종가 트리거) ===")
+    for t in triggers:
+        cmp = "초과" if t["strict"] else "이상"
+        lines.append(f"  {t['label']}: {t['trig']:,.0f}원 {cmp} (T-1 {t1:,} 대비 {t['pctchg']:+.2f}%)  [{t['note']}]")
+    lines.append("  ※ ③ 매수관여율/특정계좌 요건은 KRX 비공개 데이터 — 가격 외 조건은 외부 확정 불가")
+
+    # 복붙용 한 줄 안내 문구
+    desig_day = next_trading_day(tomorrow)          # 요건 충족 시 지정 효력일 (T+1)
+    dstr = f"{desig_day.month}/{desig_day.day}"
+
+    def _clause(t):
+        # ②(최근 15일 최고종가 초과)가 실효 기준이면 가격 대신 '초과' 표현
+        if t["strict"]:
+            if t["trig"] == t1:
+                return f"어제 종가({t1:,}원)보다 높게 마감 시"
+            return f"금일 종가 {t['trig']:,.0f}원 초과 ({t['pctchg']:+.2f}%) 마감 시"
+        return f"금일 종가 기준 {t['trig']:,.0f}원 ({t['pctchg']:+.2f}%) 마감 시"
+
+    confirms = sorted([t for t in triggers if t["confirm"]], key=lambda x: x["trig"])
+    accounts = sorted([t for t in triggers if not t["confirm"]], key=lambda x: x["trig"])
+    segs = []
+    if accounts:
+        segs.append(f"{_clause(accounts[0])} {dstr}부터 투경 가능성 있음 (소수 계좌 여부에 달림)")
+    if confirms:
+        c = confirms[0]
+        if accounts:
+            segs.append(
+                f"{c['trig']:,.0f}원 ({c['pctchg']:+.2f}%) 이상 상승 마감시에는 "
+                f"소수 계좌에 관계없이 투경 확정"
+            )
+        else:
+            segs.append(f"{_clause(c)} {dstr}부터 투경 확정")
+
+    lines.append("")
+    lines.append("=== 안내 문구 (복붙용) ===")
+    lines.append(f"{name} : " + ", ".join(segs))
+    return lines
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print("사용법: python3 check_warning.py <종목명> [기준일 YYYY-MM-DD]", file=sys.stderr)
+        sys.exit(1)
+    name = args[0]
+    run_date = None
+    if len(args) >= 2:
+        try:
+            run_date = datetime.strptime(args[1], "%Y-%m-%d").date()
+        except ValueError:
+            print("기준일 형식 오류 (YYYY-MM-DD)", file=sys.stderr)
+            sys.exit(1)
+    try:
+        print(check_warning_stock(name, today=run_date))
     except ValueError as e:
         print(f"에러: {e}", file=sys.stderr)
         sys.exit(2)
