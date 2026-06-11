@@ -98,6 +98,13 @@ def resolve_code(name):
     return code
 
 
+def prev_trading_day(d):
+    d = d - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def next_trading_day(today=None):
     if today is None:
         today = date.today()
@@ -105,6 +112,28 @@ def next_trading_day(today=None):
     while nxt.weekday() >= 5:
         nxt += timedelta(days=1)
     return nxt
+
+
+def is_market_open():
+    """Naver Finance API로 현재 정규장 진행 중 여부 판단.
+    Returns True if 정규장 중, False otherwise (장전/장후/휴장/주말).
+    """
+    try:
+        url = "https://m.stock.naver.com/api/stock/005930/basic"
+        data = json.loads(_http_get(url))
+        return data.get("marketStatus") == "OPEN"
+    except Exception:
+        return False
+
+
+def auto_basis():
+    """가격 데이터가 확정된 마지막 거래일 (= T-1) 자동 결정.
+    장중이면 어제(T-1) → T=오늘, 장후면 오늘(T-1) → T=내일.
+    """
+    today = date.today()
+    if is_market_open():
+        return prev_trading_day(today)
+    return today
 
 
 def fetch_disclosures(code, size=20):
@@ -367,9 +396,9 @@ def calculate_release_scenario(prices, conditions, today_close):
     t_minus_2 = closes[-2]
     t_minus_5 = closes[-5]
     t_minus_15 = closes[-15]
-    last_15 = closes[-15:]
-    max_15 = max(c for _, c in last_15)
-    max_15_date = next(d for d, c in last_15 if c == max_15)
+    last_14 = closes[-14:]  # T-1 ~ T-14 (T 포함 15일에서 T 제외)
+    max_15 = max(c for _, c in last_14)
+    max_15_date = next(d for d, c in last_14 if c == max_15)
 
     pct1 = conditions["pct1"] if conditions["pct1"] is not None else 0.45
     pct2 = conditions["pct2"] if conditions["pct2"] is not None else 0.75
@@ -918,6 +947,8 @@ def main():
         except ValueError:
             print("기준일 형식 오류 (YYYY-MM-DD)", file=sys.stderr)
             sys.exit(1)
+    else:
+        run_date = auto_basis()
     try:
         print(check_warning_stock(name, today=run_date))
     except ValueError as e:
