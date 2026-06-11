@@ -1,66 +1,68 @@
-# tugyeong-eod
+# krx-warnline
 
-장 종료(End-of-Day) 후 한국 시장의 **투자경고종목**(투경)을 입력하면, **다음 거래일** 기준으로
-- 이미 해제되었는지 / 곧 해제 예정인지
-- 판단일 진행 중이라면 종가가 얼마면 해제 / 거래정지가 되는지
-- 아직 판단일 전이면 첫 판단일이 언제인지
-- 투자위험종목으로 격상되었는지
+An End-of-Day CLI for Korea Exchange (KRX) market-alert stocks. Give it a stock name and it reports, for the **next trading day**:
 
-를 멀티라인 텍스트로 한 번에 보여주는 CLI 도구입니다.
+- whether an **investment-warning** (투자경고) designation has already been lifted or is about to be
+- if the judgment window is in progress, what closing price would trigger a **release** or a **trading halt**
+- if the judgment window hasn't started yet, when the first judgment day is
+- whether the stock has been escalated to **investment-risk** (투자위험)
+- if the stock is currently a **warning-pre-designation** (투자주의), what closing price on the judgment day would push it into investment-warning
 
-장 종료 이후 (저녁 9시 이후) 종목명 하나씩 돌려서 다음날 시나리오를 미리 점검하는 용도로 설계되었습니다. Naver Finance 공개 API만 사용하며 **외부 패키지 의존성 없음**.
+Output is a single multi-line block (in Korean, matching KRX terminology). Designed to be run after the close (e.g. after 9 PM), one stock name at a time, to preview the next day's scenarios. Uses only Naver Finance public APIs — **no external package dependencies**.
 
-## 지원하는 케이스
+## Supported cases
 
-- ✅ KOSPI / KOSDAQ 보통주
-- ✅ **우선주** (자동으로 보통주 코드에서 공시 가져오고 우선주 가격으로 시나리오 계산)
-- ✅ **거래정지일** 자동 skip (T-N 인덱스가 거래일 기준으로 정확히 계산)
-- ✅ **투자위험종목 격상** 감지 (격상 시 분석 중단 안내)
-- ✅ **재지정 / 판단일 이연** (매일 갱신되는 시나리오 자동 반영)
-- ✅ **매매거래정지 예고** 공시 게이팅 (예고 있을 때만 거래정지 분석)
+- ✅ KOSPI / KOSDAQ common stocks
+- ✅ **Preferred shares** (disclosures auto-fetched from the common-stock code; scenario computed on the preferred-share price series)
+- ✅ **Trading-suspension days** auto-skipped (T-N indexing stays accurate on trading-day basis)
+- ✅ **Investment-risk escalation** detection (analysis halts with a notice when escalated)
+- ✅ **Re-designation / judgment-day deferral** (daily-rolling scenarios reflected automatically)
+- ✅ **Trading-halt preview** gating (halt analysis only when a preview disclosure exists)
+- ✅ **Pre-designation → designation thresholds** (from the 투자주의 stage: what judgment-day close lands the stock in investment-warning — per route: short-surge / short-rise·unsound / ultra-long-term surge)
 
-## 요구사항
+## Requirements
 
-- Python 3.8+ (표준 라이브러리만 사용: `urllib`, `json`, `re`, `html`, `datetime`)
+- Python 3.8+ (standard library only: `urllib`, `json`, `re`, `html`, `datetime`)
 
-## 설치
+## Install
 
 ```bash
-git clone https://github.com/erikimdg/tugyeong-eod.git
-cd tugyeong-eod
+git clone https://github.com/erikimdg/krx-warnline.git
+cd krx-warnline
 ```
 
-## 사용법
+## Usage
 
 ### CLI
 
 ```bash
-python3 check_warning.py "<종목명>"
+python3 check_warning.py "<stock_name>" [as_of_date YYYY-MM-DD]
 ```
 
-종목명은 한글/영문/특수문자/우선주 표기 그대로. 예:
-- `"드림시큐리티"` (보통주)
-- `"태영건설우"` (우선주)
-- `"THE E&M"`, `"CSA 코스믹"` (특수문자)
+Omit the date to use today. To backtest, pass a basis date as the second argument (e.g. `python3 check_warning.py "테스" 2026-06-10`). With a basis date, the tool only looks at disclosures issued up to that date and truncates price data to that day — and the judgment day T becomes the *next* trading day after it.
 
-### 모듈 임포트 & 백테스트
+Stock name is passed verbatim — Korean/English/symbols/preferred-suffix all work. Examples:
+- `"드림시큐리티"` (common)
+- `"태영건설우"` (preferred)
+- `"THE E&M"`, `"CSA 코스믹"` (with symbols)
+
+### Import / backtest
 
 ```python
 from check_warning import check_warning_stock
-
-# 기본: 오늘 기준
-print(check_warning_stock("드림시큐리티"))
-
-# 특정 기준일로 백테스트
 from datetime import date
-print(check_warning_stock("태영건설우", today=date(2026, 4, 29)))
+
+print(check_warning_stock("드림시큐리티"))               # as of today
+print(check_warning_stock("태영건설우", today=date(2026, 4, 29)))  # backtest
 ```
 
-`today` 인자를 주면 그 시점에 발행된 공시까지만 보고 가격 데이터도 그날까지로 잘라서 평가합니다 (백테스트용).
+The `today` argument scopes both disclosures and price data to that point in time.
 
-## 출력 예시
+## Output examples
 
-### 1) 판단일 진행 중 — 거래정지 위험 없음
+> Program output is in Korean (KRX terms). Captions below are English; the sample blocks show the actual output.
+
+### 1) Judgment in progress — no halt risk
 
 ```
 $ python3 check_warning.py "한국피아이엠"
@@ -71,145 +73,80 @@ $ python3 check_warning.py "한국피아이엠"
 다음 거래일: 2026-05-25 (월)
 
 최신 공시: 한국피아이엠(주) 투자경고종목지정
-공시일시: 2026-05-08T06:53:55
 지정일: 2026-05-11 (월)
 최초 판단일: 2026-05-22 (금)
 해제요건 임계: T-5 +45% / T-15 +75%
 매매거래정지: 있음
 
 === 해제 시나리오 (판단일 진행 중) ===
-최근 거래일 종가 (T-1): 98,000원  [2026-05-21]
-T-2 종가: 78,500원  [2026-05-20]
 T-5 종가: 107,000원  [2026-05-15]
-T-15 종가: 101,300원  [2026-04-29]
-최근 15일 최고: 137,600원  [2026-05-08]
-
 cond1 (T-5 × 1.45): 155,150원
 cond2 (T-15 × 1.75): 177,275원
 cond3 (15일 최고가): 137,600원
 해제 임계가 (cond3): 137,600원
-
 다음 종가 해제 조건: < 137,600원 (+40.4% 미만 상승)
 거래정지 위험: 없음 (매매거래정지 예고 공시 없음)
 ```
 
-### 2) 판단일 진행 중 — 거래정지 예고 + 보수 임계가
+### 2) Pre-designation → designation thresholds (투자주의 stage)
+
+When the latest relevant disclosure is `투자경고종목 지정예고`, the tool computes — per route — what judgment-day (T) close would trigger the investment-warning designation.
 
 ```
-$ python3 check_warning.py "대덕전자"   # 2026-05-13 백테스트
+$ python3 check_warning.py "테스" 2026-06-10
 
-종목명: 대덕전자
-종목코드: 353200
-실행일: 2026-05-13 (수)
-다음 거래일: 2026-05-14 (목)
+종목명: 테스
+지정예고일: 2026-06-11 (목)
+최초 판단일: 2026-06-11 (목)
+순연 마감(판단 종료): 2026-06-24 (수)
 
-최신 공시: 대덕전자(주) 투자경고종목 지정
-공시일시: 2026-04-24T06:53:23
-지정일: 2026-04-27 (월)
-최초 판단일: 2026-05-12 (화)
-해제요건 임계: T-5 +45% / T-15 +75%
-매매거래정지: 있음
+시장: KOSDAQ  |  판단일(T) = 2026-06-11 (목) 기준 (다음 거래일)
+T-1 2026-06-10 (수) 종가 173,400원  |  T-5 2026-06-04 (목) 종가 135,900원
+② 최근 15일 최고종가(T 제외): 173,400원 → T 종가가 이보다 높아야 충족
 
-=== 해제 시나리오 (판단일 진행 중) ===
-최근 거래일 종가 (T-1): 142,900원  [2026-05-13]
-T-2 종가: 128,000원  [2026-05-12]
-T-5 종가: 120,700원  [2026-05-07]
-T-15 종가: 100,300원  [2026-04-21]
-최근 15일 최고: 142,900원  [2026-05-13]
+── 경로 [1] 단기급등 (T-5 +60%) ──
+  ① T-5 135,900 × 1.60 = 217,440원  |  T-1 대비 +25.40%
+  ③ 주가상승률 ≥ KOSDAQ 5배: 지수 5일 -9.34% → ✅충족 (T-1 근사)
+  ▶ 가격 트리거(①): 217,440원 이상 | 상한가 225,000원 → 도달가능
 
-cond1 (T-5 × 1.45): 175,015원
-cond2 (T-15 × 1.75): 175,525원
-cond3 (15일 최고가): 142,900원
-해제 임계가 (cond3): 142,900원
+── 경로 [2] 단기상승·불건전 (T-5 +45%) ──
+  ① T-5 135,900 × 1.45 = 197,055원  |  T-1 대비 +13.64%
+  ③ 매수관여율(특정계좌) — ⚠ 외부확인불가 (KRX 내부 감시데이터)
+  ▶ 가격 트리거(①): 197,055원 이상 | 상한가 225,000원 → 도달가능
 
-다음 종가 해제 조건: T-1(142,900원)보다 낮게 마감
-매매거래정지 예고: 2026-05-13 발행
-⚠ 거래정지 트리거: 종가 ≥ 179,200원 (+25.4%) [상한가 185,700원]
-실효 해제 임계가 (보수): < 142,900원 (+0.0% 미만)
+=== 안내 문구 (복붙용) ===
+테스 : 금일 종가 기준 197,055원 (+13.64%) 마감 시 6/12부터 투경 가능성 있음 (소수 계좌 여부에 달림), 217,440원 (+25.40%) 이상 상승 마감시에는 소수 계좌에 관계없이 투경 확정
 ```
 
-### 3) 우선주 (거래정지 이연 포함)
+Routes and thresholds:
 
-```
-$ python3 check_warning.py "태영건설우"   # 2026-04-29 백테스트
+- **Short-surge (60%) / short-rise (45%)**: threshold = `T-5 close × (1 + pct)`; condition ② requires the close to exceed the highest close of the last 15 trading days.
+- **Ultra-long-term surge (200% over 1 year)**: threshold = `1yr-ago close × (1 + 2.00 + index_return)`. The "composite index" is the stock's own market index (KOSPI for KOSPI names, KOSDAQ for KOSDAQ names) — confirmed by cross-checking against KRX pre-designation reasons.
+- ⚠ **Condition ③ (account participation / specific accounts)** is non-public KRX surveillance data and cannot be computed externally — it is flagged `외부확인불가`. (The short-surge ③ is the "index ×5" rule, which *is* computable.)
+- ⚠ **Condition ④ (market-cap rank outside top 100)** shows market cap only instead of an exact combined ranking (usually satisfied for alert targets); precise rank needs KRX.
+- The `=== 안내 문구 (복붙용) ===` block is a one-line, copy-paste-ready summary. "확정" (confirmed) when the binding route's ③ is computable; "가능성 있음 (소수 계좌 여부에 달림)" (possible, depends on a few accounts) when ③ is the non-public account rule.
 
-종목명: 태영건설우
-종목코드: 009415 (우선주)  | 공시조회: 009410 (보통주)
-실행일: 2026-04-29 (수)
-다음 거래일: 2026-04-30 (목)
-
-최신 공시: (주)태영건설 투자경고종목 지정(태영건설우)
-공시일시: 2026-04-10T06:53:23
-지정일: 2026-04-13 (월)
-최초 판단일: 2026-04-24 (금)
-해제요건 임계: T-5 +60% / T-15 +100%
-매매거래정지: 있음
-
-=== 해제 시나리오 (판단일 진행 중) ===
-최근 거래일 종가 (T-1): 11,880원  [2026-04-29]
-T-2 종가: 12,050원  [2026-04-28]
-T-5 종가: 12,980원  [2026-04-23]
-T-15 종가: 6,740원  [2026-04-08]
-최근 15일 최고: 12,980원  [2026-04-23]
-
-cond1 (T-5 × 1.60): 20,768원
-cond2 (T-15 × 2.00): 13,480원
-cond3 (15일 최고가): 12,980원
-해제 임계가 (cond3): 12,980원
-
-다음 종가 해제 조건: < 12,980원 (+9.3% 미만 상승)
-거래정지 위험: 없음 (매매거래정지 예고 공시 없음)
-```
-
-공시는 보통주(009410)에서, 가격은 우선주(009415)에서 가져왔고, 4/16 우선주 거래정지일은 자동 skip되어 T-15가 4/8로 정확히 매핑됨. 실제 4/30 종가 11,200원 < 12,980원 → 5/4 해제 예측 적중.
-
-### 4) 신규 지정 / 판단일 도래 전
-
-```
-$ python3 check_warning.py "광전자"
-
-종목명: 광전자
-종목코드: 017900
-실행일: 2026-05-22 (금)
-다음 거래일: 2026-05-25 (월)
-
-최신 공시: 광전자(주) 투자경고종목 지정(재지정)
-공시일시: 2026-05-21T06:54:24
-지정일: 2026-05-22 (금)
-최초 판단일: 2026-06-08 (월)
-해제요건 임계: T-5 +60% / T-15 +100%
-매매거래정지: 있음
-
-상태: 아직 판단일 도달 전 (다음 거래일 2026-05-25 < 최초 판단일 2026-06-08)
-```
-
-### 5) 이미 해제됨
+### 3) Already lifted
 
 ```
 $ python3 check_warning.py "이오테크닉스"
 
 최신 공시: (주)이오테크닉스 [투자주의]투자경고종목 지정해제 및 재지정 예고
-공시일시: 2026-05-15T06:53:48
 해제일: 2026-05-18 (월)
 상태: 이미 해제 상태 (2026-05-18 (월) 해제)
 주의: 예고 공시 — 이후 재지정 가능성 확인 필요
 ```
 
-### 6) 투자위험종목 격상
+### 4) Escalated to investment-risk
 
 ```
 $ python3 check_warning.py "가온전선"
-
-종목명: 가온전선
-종목코드: 000500
-실행일: 2026-05-22 (금)
-다음 거래일: 2026-05-25 (월)
 
 ⚠ 투자위험종목 격상 감지: 2026-05-08 가온전선(주) 투자위험종목 지정
 → 투자경고 분석은 무효. 투자위험종목 별도 처리 필요.
 ```
 
-### 7) 투자경고 무관 종목
+### 5) Not a market-alert stock
 
 ```
 $ python3 check_warning.py "삼성전자"
@@ -217,124 +154,88 @@ $ python3 check_warning.py "삼성전자"
 상태: 투자경고 관련 공시 없음
 ```
 
-## 동작 원리
+## How it works
 
-### 데이터 소스 (모두 Naver Finance 공개 엔드포인트)
+### Data sources (all Naver Finance public endpoints)
 
-| 용도 | URL |
-|------|-----|
-| 종목명 → 종목코드 | `ac.stock.naver.com/ac?q={name}&target=stock` |
-| 공시 목록 | `m.stock.naver.com/api/stock/{code}/disclosure?page=1&size=20` |
-| 공시 상세 (HTML) | `m.stock.naver.com/api/stock/{code}/disclosure/{id}` |
-| 일별 시세 OHLCV | `fchart.stock.naver.com/siseJson.naver?symbol={code}&...` |
+| Purpose | URL |
+|---------|-----|
+| name → code | `ac.stock.naver.com/ac?q={name}&target=stock` |
+| disclosure list | `m.stock.naver.com/api/stock/{code}/disclosure?page=1&size=20` |
+| disclosure detail (HTML) | `m.stock.naver.com/api/stock/{code}/disclosure/{id}` |
+| daily OHLCV | `fchart.stock.naver.com/siseJson.naver?symbol={code}&...` |
+| market cap / market type | `m.stock.naver.com/api/stock/{code}/integration`, autocomplete `typeCode` |
 
-### 전체 흐름
+If the local TLS chain can't be verified (e.g. behind a corporate proxy), `_http_get` retries once with an unverified context — these are public read-only endpoints.
 
-```
-종목명
-  ↓ (autocomplete)
-종목코드
-  ↓ 우선주 판정 (이름 끝이 '우'/'우B'/'우C'?)
-  ├─ 보통주 → disclosure_code = code, price_code = code
-  └─ 우선주 → disclosure_code = code[:-1]+'0' (보통주), price_code = code
-  ↓ (disclosure_code로 disclosure API)
-공시 목록 → 제목 끝 '(XXX우)' 필터링 (해당 종목만)
-  ↓
-투자위험종목 격상 감지 (지정 이후 발행)
-  ├─ 격상됨 → 분석 중단 + 안내
-  └─ 격상 없음
-       ↓
-최신 투자경고 관련 공시
-  ├─ 지정해제 류 → 본문에서 해제일 추출 → 상태 표시
-  ├─ 지정 류 → 본문에서 지정일/최초판단일/pct1/pct2/no_halt 추출
-  │   ├─ 다음 거래일 < 최초 판단일 → "판단일 도달 전"
-  │   └─ 다음 거래일 ≥ 최초 판단일
-  │       ↓ (price_code로 fchart, 거래정지일 skip)
-  │       T-1/T-2/T-5/T-15 종가 + 15일 최고가
-  │       ↓
-  │       cond1/cond2/cond3 → 해제 임계가 = min(...)
-  │       ↓
-  │       매매거래정지 예고 공시 검색
-  │       ├─ 있음 → 거래정지 트리거 + 실효 해제 임계가(보수)
-  │       └─ 없음 → "거래정지 위험: 없음"
-  └─ 무관 / 없음 → "투자경고 관련 공시 없음"
-```
-
-### 해제 조건 (3가지 중 하나라도 미충족 시 다음날 해제)
-
-판단일 T에 대해:
-- **cond1**: T종가 < T-5종가 × (1 + pct1)
-- **cond2**: T종가 < T-15종가 × (1 + pct2)
-- **cond3**: T종가 < 최근 15거래일(T-1~T-15) 종가 최고가
-
-`해제 임계가 = min(cond1, cond2, cond3)`
-
-`pct1`/`pct2`는 종목별로 다름 (`45%/75%` 또는 `60%/100%`). 공시 본문에서 정규식으로 파싱.
-
-### 매매거래정지 게이팅
-
-거래소 규정상 다음 **세 조건** 모두 충족 시 다음 거래일 1일 거래정지:
-1. T-2 대비 +40% 이상 상승
-2. T 종가 > 지정전일 종가
-3. T 종가 > T-1 종가
-
-거래소는 위 조건이 충족될 가능성이 있을 때 T-1에 **`매매거래정지 예고`** 공시를 발행합니다. 따라서:
-
-- **예고 공시가 있다**: T-2 × 1.4 기반 트리거 표시 + 상한가 도달 가능성 분석
-- **예고 공시가 없다**: 그냥 "거래정지 위험: 없음" 한 줄로 처리
-
-이 게이팅 덕분에 지정전일 종가 같은 추가 데이터를 직접 파싱할 필요 없이 거래소의 사전 판단을 그대로 사용합니다.
-
-### 실효 해제 임계가 (보수)
-
-거래정지 예고가 있는 경우, **해제 임계가**와 **거래정지 트리거** 둘 중 더 낮은 값이 실질적 해제 가능 상한입니다.
+### Flow
 
 ```
-실효 해제 임계가 = min(해제 임계가, 거래정지 트리거)
+name → (autocomplete) → code
+  → preferred? (name ends with 우/우B/우C) → disclosure_code / price_code split
+  → disclosure list → filter by trailing "(XXX우)" suffix
+  → escalation to investment-risk? → stop + notice
+  → newest relevant disclosure:
+      ├─ release          → parse release date → status
+      ├─ designation      → parse designation/judgment date, pct1/pct2, no_halt
+      │     ├─ next trading day < first judgment day → "not yet"
+      │     └─ else → T-1/T-2/T-5/T-15 closes + 15-day high → cond1/2/3 → release threshold
+      ├─ pre-designation  → parse routes → per-route designation thresholds for judgment day T
+      └─ none → "no market-alert disclosure"
 ```
 
-해제 조건과 거래정지가 동시에 충족되는 경우 KRX 처리는 명시적이지 않으므로, 안전하게 둘 중 낮은 값 미만으로 마감하는 것을 권장합니다.
+### Release conditions (lifts next day if any one fails)
 
-### 우선주 처리
+For judgment day T:
+- **cond1**: T close < T-5 close × (1 + pct1)
+- **cond2**: T close < T-15 close × (1 + pct2)
+- **cond3**: T close < highest close of the last 15 trading days (T-1…T-15)
 
-우선주는 KRX 공시 시스템에서 보통주 코드에 통합 등록됩니다. (예: 태영건설우 공시는 009415가 아닌 009410의 disclosure에 들어감.) 따라서:
+`release threshold = min(cond1, cond2, cond3)`. `pct1`/`pct2` are stock-specific (`45%/75%` or `60%/100%`), parsed from the disclosure body via regex.
 
-- 종목명이 `우` / `우B` / `우C`로 끝나면 우선주로 판정
-- 공시는 보통주 코드(우선주 코드 마지막 자리 → 0)에서 조회
-- 제목 끝 `(XXX우)` 패턴으로 필터링해 해당 우선주 대상 공시만 채택
-- 가격(fchart)은 우선주 코드 그대로 사용
+### Pre-designation (designation) conditions
 
-### 거래정지일 처리
+The judgment day T is the next trading day; T-1 is the latest available close. For each route parsed from the `[1]`/`[2]` blocks of the notice:
+- price threshold from ① (short: `T-5 × (1+pct)`; ultra-long: `1yr × (1 + 2.00 + index_return)`)
+- ② the close must exceed the highest close of the last 15 trading days
+- ③ index-×5 rule (computable) or account-participation rule (non-public → flagged)
+- ④ market-cap rank outside the combined top 100 (market cap shown; exact rank needs KRX)
 
-fchart는 거래정지일에도 데이터 row를 반환하지만 시가/고가/저가/거래량이 모두 0이고 종가만 전일 값으로 채워져 있습니다. T-N 인덱스가 거래일 기준이어야 하므로 `시가==0` 또는 `거래량==0`인 행은 skip합니다.
+The binding price trigger is `max(① threshold, ② recent-15-day high)`; "<" vs ">" wording reflects which one binds.
 
-### 거래일 처리
+### Trading-halt gating
 
-- "다음 거래일": 호출 시점 +1 (주말이면 다음 월요일). 공휴일은 미반영 (대부분 평일 운영이라 영향 미미).
-- T-N 종가: fchart 일별 데이터에서 거래정지일 skip 후 인덱스 기준.
+A 1-day halt the next session requires all three: (1) +40% vs T-2, (2) T close > pre-designation-day close, (3) T close > T-1 close. KRX issues a **`매매거래정지 예고`** disclosure on T-1 when this is likely, so the tool only shows a halt trigger (`T-2 × 1.4`, with reachability vs the daily upper limit) when that preview exists. The conservative effective release threshold is `min(release threshold, halt trigger)`.
 
-### 공시 분류
+### Preferred shares
 
-제목 패턴:
+Preferred-share disclosures are filed under the common-stock code. So: detect preferred by name suffix; fetch disclosures from the common code (last digit → 0); keep only disclosures whose title ends with the matching `(XXX우)`; use the preferred code for prices.
 
-| 패턴 | 분류 |
-|------|------|
-| `투자경고종목` + `지정해제` | release (해제) |
-| 제목이 `투자경고종목 지정[(…)]`으로 종료 (예고/해제/지정중 제외) | designation (지정) |
+### Trading-suspension & trading-day handling
+
+fchart returns rows for suspension days too, with open/high/low/volume all 0 and close carried over — rows with `open==0` or `volume==0` are skipped so T-N indexing stays on a trading-day basis. "Next trading day" is +1 calendar day skipping weekends (public holidays not modeled).
+
+### Disclosure classification
+
+| Title pattern | Class |
+|---------------|-------|
+| `투자경고종목` + `지정해제` | release |
+| `투자경고종목` + `지정예고` | pre-designation |
+| title ends with `투자경고종목 지정[(…)]` (excl. preview/release) | designation |
 | `매매거래정지` + `예고` | halt preview |
-| `투자위험종목` + `지정` (예고/해제 제외) | escalation (격상) |
-| `지정예고` | 무시 |
-| 그 외 | 무시 |
+| `투자위험종목` + `지정` (excl. preview/release) | escalation |
+| otherwise | ignored |
 
-## 캐싱
+## Caching
 
-종목명 → 종목코드 매핑은 스크립트와 같은 폴더의 `stock_codes.json`에 자동 캐싱. `.gitignore` 처리됨.
+Name → code mappings are cached in `stock_codes.json` next to the script (git-ignored).
 
-## 면책
+## Disclaimer
 
-- Naver Finance 공개 API에 의존하므로 API 변경 시 동작이 깨질 수 있음.
-- 공시 본문은 KRX 표준 양식 기준 정규식 파싱. 양식 변경 시 파싱 실패 가능.
-- 데이터 신선도: 장 마감 직후엔 fchart에 당일 종가가 아직 반영되지 않을 수 있음. **저녁 9시 이후** 실행 권장.
+- Depends on Naver Finance public APIs; may break if those change.
+- Disclosure bodies are parsed by regex against the standard KRX template; format changes can break parsing.
+- Data freshness: right after the close, fchart may not yet have the day's close — run **after ~9 PM**.
+- Conditions ③ (account participation) and ④ (exact market-cap rank) for designation are non-public/approximate and are flagged as such.
 
 ## License
 
